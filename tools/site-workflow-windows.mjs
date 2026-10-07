@@ -1,7 +1,9 @@
-// Windows ConPTY cannot be inherited by some child processes. Keep the official
-// Sites workflow unchanged, but give it ordinary pipes for its subprocesses.
+// Keep the official Sites workflow unchanged, with ordinary subprocess pipes
+// and the installed Git Bash on its session-local PATH for archive packaging.
 // Credentials are received through hidden stdin and never written to disk.
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 const [helper,projectId] = process.argv.slice(2);
 if (!helper || !projectId) throw new Error('Provide the official Sites helper path and Site ID.');
 const terminal = process.stdin.isTTY;
@@ -29,9 +31,18 @@ const input = await new Promise((resolve,reject)=>{
   process.stdin.resume();
 });
 try { JSON.parse(input); } catch { throw new Error('Provide JSON on stdin.'); }
-const child = spawn(process.execPath,[helper,'--project-id',projectId],{stdio:['pipe','pipe','pipe'],env:process.env});
+const env = {...process.env};
+if (process.platform === 'win32') {
+  const gitBin = path.join(process.env.ProgramFiles || 'C:\\Program Files','Git','bin');
+  if (existsSync(path.join(gitBin,'bash.exe'))) {
+    const pathKey = Object.keys(env).find(key=>key.toLowerCase()==='path') || 'Path';
+    env[pathKey] = gitBin + path.delimiter + (env[pathKey] || '');
+  }
+}
+const child = spawn(process.execPath,[helper,'--project-id',projectId],{stdio:['pipe','pipe','pipe'],env});
 child.stdout.pipe(process.stdout);
 child.stderr.pipe(process.stderr);
 child.once('error',()=>{process.stderr.write('Could not launch the official Sites helper.\n');process.exitCode=1;});
+child.stdin.on('error',()=>{process.exitCode=1;});
 child.stdin.end(input+'\n');
 child.once('close',code=>{process.exitCode=code??1;});
