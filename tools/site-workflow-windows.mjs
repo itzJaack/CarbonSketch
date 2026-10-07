@@ -37,6 +37,8 @@ if (process.platform === 'win32') {
   if (existsSync(path.join(gitBin,'bash.exe'))) {
     const pathKey = Object.keys(env).find(key=>key.toLowerCase()==='path') || 'Path';
     env[pathKey] = gitBin + path.delimiter + (env[pathKey] || '');
+    // GNU tar otherwise interprets a Windows drive-letter archive as a host.
+    env.TAR_OPTIONS = ((env.TAR_OPTIONS || '') + ' --force-local').trim();
   }
 }
 const child = spawn(process.execPath,[helper,'--project-id',projectId],{stdio:['pipe','pipe','pipe'],env});
