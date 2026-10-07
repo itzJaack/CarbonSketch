@@ -1,11 +1,12 @@
 import { resolveCompound } from './chemistry.js';
 import { renderTopology, renderLewis, renderCondensed, create3DViewer, getLewisNotes } from './renderers.js';
+import { renderCondensed2D } from './condensed2d.js';
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const formulaHtml = value => escape(value).replace(/(\d+)/g, '<sub>$1</sub>');
-const viewNames = {topology:'Formula topologica',lewis:'Struttura di Lewis',condensed:'Struttura condensata','3d':'Modello 3D'};
+const viewNames = {topology:'Formula topologica',lewis:'Struttura di Lewis',condensed:'Struttura condensata',condensed2d:'Condensata 2D','3d':'Modello 3D'};
 const colors = {C:'#4f7466',H:'#d5e1db',O:'#e37482',N:'#789fda',F:'#77bf9c',Cl:'#77bf9c',Br:'#b68b66',I:'#b891c5',S:'#dfbc55',P:'#e5a36b'};
 let current, viewer, expandedViewer, request, searchSequence = 0, currentView = 'all', spin = false, toastTimer;
 let history = [];
@@ -46,6 +47,14 @@ function updateFormula() {
   $('#condensed-description').textContent = current.condensedNote || (current.condensed ? 'Le parentesi indicano gruppi collegati all’atomo che le precede.' : 'Gruppi di atomi espliciti, con tutti i collegamenti della struttura.');
   $('#copy-condensed').disabled = !current.condensed;
   $('#copy-condensed').title = current.condensed ? 'Copia struttura condensata' : 'Per questa struttura è disponibile il download SVG';
+  const canvas2d = $('#condensed-2d-canvas');
+  const diagram2d = renderCondensed2D(current,{width:Math.max(320,canvas2d.clientWidth-34),height:240,numbering:$('#condensed-2d-numbering').checked});
+  canvas2d.innerHTML = diagram2d;
+  const svg2d = canvas2d.querySelector('svg');
+  svg2d.style.width = `${svg2d.getAttribute('width')}px`;
+  svg2d.style.height = `${svg2d.getAttribute('height')}px`;
+  $('#condensed-2d-note').textContent = svg2d.dataset.fallback === 'true' ? 'Gruppi di atomi espliciti, con tutti i collegamenti della struttura.' : 'La catena principale è orizzontale; i rami sono collegati al loro carbonio.';
+  $('#condensed-2d-numbering').disabled = svg2d.dataset.fallback === 'true';
 }
 
 function updateModel() {
@@ -117,7 +126,7 @@ function setView(view) {
   $$('.view-tab').forEach(tab => {const active = tab.dataset.view === view;tab.classList.toggle('active',active);tab.setAttribute('aria-selected',String(active));tab.tabIndex = active ? 0 : -1;});
   $$('.formula-card').forEach(card => {card.hidden = view !== 'all' && card.dataset.card !== view;});
   $('#formula-grid').classList.toggle('focused',view !== 'all');
-  $('#view-count').textContent = view === 'all' ? '4 prospettive, 1 molecola' : viewNames[view];
+  $('#view-count').textContent = view === 'all' ? '5 prospettive, 1 molecola' : viewNames[view];
   if (current) updateFormula();
   if (current && (view === '3d' || view === 'all')) requestAnimationFrame(() => { if (!viewer) updateModel(); else viewer.resize(); });
   if (view !== '3d' && view !== 'all') viewer?.setSpin(false);
@@ -129,6 +138,7 @@ function caption(mode) {
   if (mode === '3d') return `${current.conformerSource || 'Geometria illustrativa'} · Trascina per ruotare, usa la rotella o due dita per lo zoom.`;
   if (mode === 'topology') return 'Ogni vertice e ogni estremità senza etichetta rappresenta un atomo di carbonio. Gli idrogeni legati al carbonio sono sottintesi.';
   if (mode === 'lewis') return ['Ogni linea rappresenta una coppia elettronica condivisa; i puntini indicano coppie libere.',...getLewisNotes(current)].join(' ');
+  if (mode === 'condensed2d') return current.backbone?.length ? 'Catena principale in orizzontale e ramificazioni collegate ai rispettivi carboni. Gli idrogeni sono raggruppati in CH₃, CH₂ e CH. Scorri orizzontalmente per leggere le catene lunghe.' : 'Formula semisviluppata: gli idrogeni sono raggruppati con l’atomo a cui sono legati e tutti i collegamenti della struttura restano espliciti.';
   return current.condensedNote || (current.condensed ? 'Le parentesi mostrano gruppi collegati all’atomo che le precede.' : 'Formula semisviluppata: gli idrogeni sono raggruppati con l’atomo a cui sono legati. Tutti i collegamenti, compresi gli anelli, sono conservati.');
 }
 
@@ -140,6 +150,7 @@ function expand(mode) {
   $('#expanded-compound').textContent = current.name;
   $('#expanded-caption').textContent = caption(mode);
   $('#expanded-content').replaceChildren();
+  $('#expanded-content').classList.toggle('expanded-condensed-2d',mode === 'condensed2d');
   $('#expand-dialog').showModal();
   if (mode === '3d') {
     const container = document.createElement('div');
@@ -147,17 +158,22 @@ function expand(mode) {
     $('#expanded-content').append(container);
     expandedViewer = create3DViewer(container,current,{style:$('#model-style').value,hydrogens:$('#hydrogens-toggle').checked});
     if (!expandedViewer.available) container.innerHTML = '<div class="model-fallback">Le funzionalità 3D richiedono WebGL.</div>';
+  } else if (mode === 'condensed2d') {
+    $('#expanded-content').innerHTML = renderCondensed2D(current,{width:Math.max(800,$('#expanded-content').clientWidth-30),height:Math.min(540,$('#expanded-content').clientHeight-20),numbering:$('#condensed-2d-numbering').checked});
+    const svg = $('#expanded-content svg');
+    svg.style.width = `${svg.getAttribute('width')}px`;
+    svg.style.height = `${svg.getAttribute('height')}px`;
   } else if (mode === 'condensed') {
     $('#expanded-content').innerHTML = current.condensed ? `<p class="condensed-formula">${formulaHtml(current.condensed)}</p>` : renderCondensed(current,{width:1100,height:650});
   } else $('#expanded-content').innerHTML = mode === 'lewis' ? renderLewis(current,{width:1100,height:650}) : renderTopology(current,{numbering:$('#numbering-toggle').checked,width:1100,height:650});
 }
 
-function saveFile(content, mime, extension) {
+function saveFile(content, mime, extension, label) {
   const blob = content instanceof Blob ? content : new Blob([content],{type:mime});
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.download = `${current.name.replace(/[^\p{L}\p{N}-]/gu,'_')}-${extension.includes('svg')?'struttura':'carbonsketch'}.${extension}`;
+  link.download = `${current.name.replace(/[^\p{L}\p{N}-]/gu,'_')}-${label || (extension.includes('svg')?'struttura':'carbonsketch')}.${extension}`;
   document.body.append(link);link.click();link.remove();
   setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
@@ -167,6 +183,8 @@ function download(mode) {
   if (mode === 'condensed') {
     if (!current.condensed) saveFile(renderCondensed(current,{width:1500,height:850}),'image/svg+xml','svg');
     else saveFile(`${current.name}\n${current.canonicalName || ''}\nFormula molecolare: ${current.formula}\nMassa molare: ${current.mass} g/mol\nStruttura condensata: ${current.condensed}\n${caption(mode)}\nFonte: ${current.sourceUrl || current.sourceLabel}\n`,'text/plain; charset=utf-8','txt');
+  } else if (mode === 'condensed2d') {
+    saveFile(renderCondensed2D(current,{width:1100,height:380,numbering:$('#condensed-2d-numbering').checked}),'image/svg+xml','svg','condensata-2D');
   } else if (mode === '3d') {
     const uri = viewer?.exportPng();
     if (!uri) { toast('Il modello 3D non è disponibile.'); return; }
@@ -189,6 +207,7 @@ document.addEventListener('click',event=>{
 $('#guide-button').addEventListener('click',openGuide);
 $('#learn-button').addEventListener('click',openGuide);
 $('#numbering-toggle').addEventListener('change',()=>{if(current) updateFormula();});
+$('#condensed-2d-numbering').addEventListener('change',()=>{if(current) updateFormula();});
 $('#model-style').addEventListener('change',()=>viewer?.setStyle($('#model-style').value));
 $('#hydrogens-toggle').addEventListener('change',()=>viewer?.setHydrogens($('#hydrogens-toggle').checked));
 $('#reset-3d').addEventListener('click',()=>{viewer?.reset();toast('Orientamento iniziale ripristinato.');});
@@ -213,6 +232,8 @@ document.addEventListener('keydown',event=>{if(event.key==='/'&&!event.ctrlKey&&
 document.addEventListener('visibilitychange',()=>viewer?.setSpin(!document.hidden&&spin));
 let resizeFrame;
 window.addEventListener('resize',()=>{cancelAnimationFrame(resizeFrame);resizeFrame=requestAnimationFrame(()=>{if(current)updateFormula();});});
-renderHistory();setView('all');
+renderHistory();
+const initialView = new URL(location.href).searchParams.get('view');
+setView(Object.hasOwn(viewNames,initialView) ? initialView : 'all');
 const initialQuery = new URL(location.href).searchParams.get('q') || '5-isobutil decano';
 search(initialQuery,{initial:true}).then(async()=>{if(searchSequence===1&&!current&&initialQuery!=='5-isobutil decano'){const error=$('#search-status').textContent;await search('5-isobutil decano',{initial:true});status(error+' È mostrato il composto di esempio.','error');}});

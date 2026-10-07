@@ -1,6 +1,6 @@
 # CarbonSketch
 
-Laboratorio molecolare in italiano: ricerca per nome, formula molecolare e massa molare, struttura condensata, topologica, Lewis e modello 3D ruotabile. Layout adattabile a computer e telefoni; viste singole, ingrandimento, numerazione della catena principale, copia e download delle formule.
+Laboratorio molecolare in italiano: ricerca per nome, formula molecolare e massa molare, struttura condensata, condensata 2D con catena orizzontale e rami verticali, topologica, Lewis e modello 3D ruotabile. Layout adattabile a computer e telefoni; viste singole, ingrandimento, numerazione della catena principale, copia e download delle formule.
 
 ## Avvio locale
 
