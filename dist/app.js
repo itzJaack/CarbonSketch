@@ -1,6 +1,7 @@
-import { resolveCompound } from './chemistry.js';
+import { resolveCompound, compoundFromGraph } from './chemistry.js';
 import { renderTopology, renderLewis, renderCondensed, create3DViewer, getLewisNotes } from './renderers.js';
 import { renderCondensed2D } from './condensed2d.js';
+import { createCondensedEditor } from './condensed-editor.js';
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
@@ -10,6 +11,7 @@ const viewNames = {topology:'Formula topologica',lewis:'Struttura di Lewis',cond
 const colors = {C:'#4f7466',H:'#d5e1db',O:'#e37482',N:'#789fda',F:'#77bf9c',Cl:'#77bf9c',Br:'#b68b66',I:'#b891c5',S:'#dfbc55',P:'#e5a36b'};
 let current, viewer, expandedViewer, request, searchSequence = 0, currentView = 'all', spin = false, toastTimer;
 let history = [];
+let editor;
 try { history = JSON.parse(localStorage.getItem('carbonsketch-history') || '[]').filter(x => typeof x === 'string').slice(0,6); } catch {}
 
 function toast(message) {
@@ -30,6 +32,62 @@ function renderHistory() {
   const items = history.filter(name => name.toLowerCase() !== current?.name?.toLowerCase());
   $('#history-section').hidden = !items.length;
   $('#history-list').innerHTML = items.map(name => `<button data-compound="${escape(name)}">${escape(name)} ↗</button>`).join('');
+}
+
+function presentCompound(compound, {drawing = false} = {}) {
+  current = compound;
+  $('#compound-name').textContent = compound.name;
+  $('#canonical-name').textContent = compound.canonicalName || '';
+  $('#canonical-name').hidden = !compound.canonicalName || compound.canonicalName === compound.name;
+  $('#molecular-formula').innerHTML = formulaHtml(compound.formula);
+  $('#molar-mass').textContent = Number.isFinite(Number(compound.mass)) ? Number(compound.mass).toLocaleString('it-IT',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—';
+  $('#molecule-family').textContent = compound.family || 'Composto';
+  $('#source-label').textContent = compound.sourceLabel || 'Struttura ricavata dal nome';
+  $('#source-link').hidden = !compound.sourceUrl;
+  if (compound.sourceUrl && /^https:\/\/(pubchem\.ncbi\.nlm\.nih\.gov|cactus\.nci\.nih\.gov)\//.test(compound.sourceUrl)) $('#source-link').href = compound.sourceUrl;
+  else $('#source-link').hidden = true;
+  $('#conformer-label').textContent = compound.conformerSource || '3D: geometria illustrativa';
+  const notes = [...new Set([...(compound.notes || []),...getLewisNotes(compound)])];
+  $('#molecule-notes').textContent = notes.join(' ');
+  $('#molecule-notes').hidden = !notes.length;
+  $('#name-interpretation').textContent = compound.inputInterpretation || '';
+  $('#name-interpretation').hidden = !compound.inputInterpretation;
+  updateFormula();
+  updateModel();
+  status('');
+  if (!drawing) {
+    history = [compound.name,...history.filter(item=>item.toLowerCase()!==compound.name.toLowerCase())].slice(0,6);
+    try { localStorage.setItem('carbonsketch-history', JSON.stringify(history)); } catch {}
+  }
+  renderHistory();
+}
+
+function setInputMode(mode) {
+  const drawing = mode === 'draw';
+  $('#name-entry').hidden = drawing;
+  $('#editor-entry').hidden = !drawing;
+  $('#input-mode-name').setAttribute('aria-pressed',String(!drawing));
+  $('#input-mode-draw').setAttribute('aria-pressed',String(drawing));
+  if (drawing && !editor) {
+    editor = createCondensedEditor($('#condensed-editor'), {
+      onAnalyze: compound => {
+        request?.abort();
+        searchSequence++;
+        $('#search-button').disabled = false;
+        $('#workspace').setAttribute('aria-busy','false');
+        presentCompound(compound,{drawing:true});
+        setView('condensed2d');
+        const url = new URL(location.href);
+        url.searchParams.delete('q');
+        url.searchParams.set('drawing','1');
+        url.searchParams.set('view','condensed2d');
+        window.history.replaceState(null,'',url);
+        try { localStorage.setItem('carbonsketch-drawing',JSON.stringify({atoms:compound.atoms,bonds:compound.bonds,backbone:compound.backbone})); } catch {}
+        toast('Disegno analizzato. Esplora tutte le viste della molecola.');
+      },
+      onError: message => toast(message)
+    });
+  }
 }
 
 function updateFormula() {
@@ -84,29 +142,10 @@ async function search(name, {initial = false} = {}) {
   try {
     const compound = await resolveCompound(trimmed, {signal:request.signal});
     if (sequence !== searchSequence) return;
-    current = compound;
-    $('#compound-name').textContent = compound.name;
-    $('#canonical-name').textContent = compound.canonicalName || compound.name;
-    $('#canonical-name').hidden = !compound.canonicalName || compound.canonicalName === compound.name;
-    $('#molecular-formula').innerHTML = formulaHtml(compound.formula);
-    $('#molar-mass').textContent = Number.isFinite(Number(compound.mass)) ? Number(compound.mass).toLocaleString('it-IT',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—';
-    $('#molecule-family').textContent = compound.family || 'Composto';
-    $('#source-label').textContent = compound.sourceLabel || 'Struttura ricavata dal nome';
-    $('#source-link').hidden = !compound.sourceUrl;
-    if (compound.sourceUrl && /^https:\/\/(pubchem\.ncbi\.nlm\.nih\.gov|cactus\.nci\.nih\.gov)\//.test(compound.sourceUrl)) $('#source-link').href = compound.sourceUrl;
-    else $('#source-link').hidden = true;
-    $('#conformer-label').textContent = compound.conformerSource || '3D: geometria illustrativa';
-    const notes = [...new Set([...(compound.notes || []),...getLewisNotes(compound)])];
-    $('#molecule-notes').textContent = notes.join(' ');
-    $('#molecule-notes').hidden = !notes.length;
-    updateFormula();
-    updateModel();
-    status('');
-    history = [compound.name,...history.filter(item=>item.toLowerCase()!==compound.name.toLowerCase())].slice(0,6);
-    try { localStorage.setItem('carbonsketch-history', JSON.stringify(history)); } catch {}
-    renderHistory();
+    presentCompound(compound);
     const url = new URL(location.href);
     url.searchParams.set('q',trimmed);
+    url.searchParams.delete('drawing');
     window.history.replaceState(null,'',url);
     if (!initial && matchMedia('(max-width:760px)').matches) $('#compound-name').scrollIntoView({block:'start',behavior:matchMedia('(prefers-reduced-motion:reduce)').matches?'auto':'smooth'});
   } catch (error) {
@@ -127,6 +166,9 @@ function setView(view) {
   $$('.formula-card').forEach(card => {card.hidden = view !== 'all' && card.dataset.card !== view;});
   $('#formula-grid').classList.toggle('focused',view !== 'all');
   $('#view-count').textContent = view === 'all' ? '5 prospettive, 1 molecola' : viewNames[view];
+  const url = new URL(location.href);
+  url.searchParams.set('view',view);
+  window.history.replaceState(null,'',url);
   if (current) updateFormula();
   if (current && (view === '3d' || view === 'all')) requestAnimationFrame(() => { if (!viewer) updateModel(); else viewer.resize(); });
   if (view !== '3d' && view !== 'all') viewer?.setSpin(false);
@@ -138,7 +180,7 @@ function caption(mode) {
   if (mode === '3d') return `${current.conformerSource || 'Geometria illustrativa'} · Trascina per ruotare, usa la rotella o due dita per lo zoom.`;
   if (mode === 'topology') return 'Ogni vertice e ogni estremità senza etichetta rappresenta un atomo di carbonio. Gli idrogeni legati al carbonio sono sottintesi.';
   if (mode === 'lewis') return ['Ogni linea rappresenta una coppia elettronica condivisa; i puntini indicano coppie libere.',...getLewisNotes(current)].join(' ');
-  if (mode === 'condensed2d') return current.backbone?.length ? 'Catena principale in orizzontale e ramificazioni collegate ai rispettivi carboni. Gli idrogeni sono raggruppati in CH₃, CH₂ e CH. Scorri orizzontalmente per leggere le catene lunghe.' : 'Formula semisviluppata: gli idrogeni sono raggruppati con l’atomo a cui sono legati e tutti i collegamenti della struttura restano espliciti.';
+  if (mode === 'condensed2d') return $('#condensed-2d-canvas svg')?.dataset.fallback !== 'true' ? 'Catena principale in orizzontale e ramificazioni collegate ai rispettivi carboni. Gli idrogeni sono raggruppati in CH₃, CH₂ e CH. Scorri orizzontalmente per leggere le catene lunghe.' : 'Formula semisviluppata: gli idrogeni sono raggruppati con l’atomo a cui sono legati e tutti i collegamenti della struttura restano espliciti.';
   return current.condensedNote || (current.condensed ? 'Le parentesi mostrano gruppi collegati all’atomo che le precede.' : 'Formula semisviluppata: gli idrogeni sono raggruppati con l’atomo a cui sono legati. Tutti i collegamenti, compresi gli anelli, sono conservati.');
 }
 
@@ -197,8 +239,11 @@ function download(mode) {
 }
 
 $('#search-form').addEventListener('submit',event=>{event.preventDefault();search($('#compound-input').value);});
+$('#input-mode-name').addEventListener('click',()=>setInputMode('name'));
+$('#input-mode-draw').addEventListener('click',()=>setInputMode('draw'));
+$('#editor-import').addEventListener('click',()=>{if(current){setInputMode('draw');editor.loadCompound(current);}});
 document.addEventListener('click',event=>{
-  const example = event.target.closest('[data-compound]');if(example) search(example.dataset.compound);
+  const example = event.target.closest('[data-compound]');if(example) {setInputMode('name');search(example.dataset.compound);}
   const tab = event.target.closest('[data-view]');if(tab) setView(tab.dataset.view);
   const expandButton = event.target.closest('[data-expand]');if(expandButton) expand(expandButton.dataset.expand);
   const downloadButton = event.target.closest('[data-download]');if(downloadButton) download(downloadButton.dataset.download);
@@ -228,12 +273,27 @@ $('.view-tabs').addEventListener('keydown',event=>{
   if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
   event.preventDefault();const tabs=$$('.view-tab');let index=tabs.findIndex(tab=>tab.dataset.view===currentView);index=event.key==='Home'?0:event.key==='End'?tabs.length-1:(index+(event.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;setView(tabs[index].dataset.view);tabs[index].focus();
 });
-document.addEventListener('keydown',event=>{if(event.key==='/'&&!event.ctrlKey&&!event.metaKey&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)&&!document.querySelector('dialog[open]')){event.preventDefault();$('#compound-input').focus();$('#compound-input').select();}});
+document.addEventListener('keydown',event=>{if(event.key==='/'&&!event.ctrlKey&&!event.metaKey&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)&&!document.querySelector('dialog[open]')){event.preventDefault();setInputMode('name');$('#compound-input').focus();$('#compound-input').select();}});
 document.addEventListener('visibilitychange',()=>viewer?.setSpin(!document.hidden&&spin));
 let resizeFrame;
 window.addEventListener('resize',()=>{cancelAnimationFrame(resizeFrame);resizeFrame=requestAnimationFrame(()=>{if(current)updateFormula();});});
 renderHistory();
 const initialView = new URL(location.href).searchParams.get('view');
 setView(Object.hasOwn(viewNames,initialView) ? initialView : 'all');
-const initialQuery = new URL(location.href).searchParams.get('q') || '5-isobutil decano';
-search(initialQuery,{initial:true}).then(async()=>{if(searchSequence===1&&!current&&initialQuery!=='5-isobutil decano'){const error=$('#search-status').textContent;await search('5-isobutil decano',{initial:true});status(error+' È mostrato il composto di esempio.','error');}});
+const initialUrl = new URL(location.href);
+let restoredDrawing = false;
+if (initialUrl.searchParams.get('drawing') === '1') {
+  try {
+    const saved = JSON.parse(localStorage.getItem('carbonsketch-drawing'));
+    if (saved) {
+      presentCompound(compoundFromGraph(saved),{drawing:true});
+      setInputMode('draw');
+      editor.loadCompound(current);
+      restoredDrawing = true;
+    }
+  } catch {}
+}
+if (!restoredDrawing) {
+  const initialQuery = initialUrl.searchParams.get('q') || '5-isobutil decano';
+  search(initialQuery,{initial:true}).then(async()=>{if(searchSequence===1&&!current&&initialQuery!=='5-isobutil decano'){const error=$('#search-status').textContent;await search('5-isobutil decano',{initial:true});status(error+' È mostrato il composto di esempio.','error');}});
+}

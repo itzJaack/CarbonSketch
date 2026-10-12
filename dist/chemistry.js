@@ -6,7 +6,7 @@
  */
 
 const API = 'https://pubchem.ncbi.nlm.nih.gov/rest/pug';
-const ATOMIC_WEIGHTS = { H:1.008, C:12.011, N:14.007, O:15.999, F:18.998, P:30.974, S:32.06, Cl:35.45, Br:79.904, I:126.904 };
+const ATOMIC_WEIGHTS = { H:1.008, B:10.81, C:12.011, N:14.007, O:15.999, F:18.998, Si:28.085, P:30.974, S:32.06, Cl:35.45, Br:79.904, I:126.904 };
 const ELEMENTS = ('? H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn Ga Ge As Se Br Kr Rb Sr Y Zr Nb Mo Tc Ru Rh Pd Ag Cd In Sn Sb Te I Xe Cs Ba La Ce Pr Nd Pm Sm Eu Gd Tb Dy Ho Er Tm Yb Lu Hf Ta W Re Os Ir Pt Au Hg Tl Pb Bi Po At Rn Fr Ra Ac Th Pa U Np Pu Am Cm Bk Cf Es Fm Md No Lr Rf Db Sg Bh Hs Mt Ds Rg Cn Nh Fl Mc Lv Ts Og').split(' ');
 const VALENCE_ELECTRONS = { H:1, B:3, C:4, N:5, O:6, F:7, Si:4, P:5, S:6, Cl:7, Br:7, I:7 };
 const cache = new Map();
@@ -56,7 +56,12 @@ const BRANCHES = [
   ...[[1,'methyl','metil'],[2,'ethyl','etil'],[3,'propyl','propil'],[4,'butyl','butil'],[5,'pentyl','pentil'],[6,'hexyl','esil']].map(([count,en,it])=>({names:[`n-${en}`,`n-${it}`,en,it],canonical:en,count,edges:Array.from({length:count-1},(_,i)=>[i,i+1])})),
 ];
 const BRANCH_NAMES = BRANCHES.flatMap(branch=>branch.names.map(token=>({token,branch}))).sort((a,b)=>b.token.length-a.token.length);
-const MULTIPLIERS = [{token:'tetra',count:4},{token:'penta',count:5},{token:'hexa',count:6},{token:'tri',count:3},{token:'di',count:2}];
+const MULTIPLIERS = [{token:'deca',count:10},{token:'nona',count:9},{token:'octa',count:8},{token:'otta',count:8},{token:'hepta',count:7},{token:'epta',count:7},{token:'tetra',count:4},{token:'penta',count:5},{token:'hexa',count:6},{token:'esa',count:6},{token:'tri',count:3},{token:'di',count:2}];
+const ITALIAN_MULTIPLIERS={2:'di',3:'tri',4:'tetra',5:'penta',6:'esa',7:'epta',8:'otta',9:'nona',10:'deca'};
+const ENGLISH_MULTIPLIERS={...ITALIAN_MULTIPLIERS,6:'hexa',7:'hepta',8:'octa'};
+const ITALIAN_ROOTS={1:'met',2:'et',3:'prop',4:'but',5:'pent',6:'es',7:'ept',8:'ott',9:'non',10:'dec',11:'undec',12:'dodec',13:'tridec',14:'tetradec',15:'pentadec',16:'esadec',17:'eptadec',18:'ottadec',19:'nonadec',20:'eicos'};
+const ITALIAN_BRANCHES={'methyl':'metil','ethyl':'etil','propyl':'propil','butyl':'butil','pentyl':'pentil','hexyl':'esil','(2-methylpropyl)':'isobutil','(propan-2-yl)':'isopropil','(butan-2-yl)':'sec-butil','tert-butyl':'tert-butil'};
+const alphabeticalBranch=label=>label.replace(/^tert-/,'').replace(/[()0-9,-]/g,'');
 
 function findParent(normalized) {
   for (const {length,root} of SORTED_ROOTS) {
@@ -85,18 +90,20 @@ function parseBranches(prefix,parentLength) {
   const result=[];
   let rest=prefix;
   while(rest) {
-    const locants=rest.match(/^(\d+(?:,\d+)*)-/);
+    // Locants may be comma-separated, dash-separated, and adjacent to the group.
+    // This is restricted to digit lists followed by a recognized branch token.
+    const locants=rest.match(/^(\d+(?:[,-]\d+)*)(?:-)?/);
     if(!locants) return null;
-    const positions=locants[1].split(',').map(Number); rest=rest.slice(locants[0].length);
+    const positions=locants[1].split(/[,-]/).map(Number); rest=rest.slice(locants[0].length);
     let multiplier=1;
-    const multi=MULTIPLIERS.find(m=>rest.startsWith(m.token)&&BRANCH_NAMES.some(b=>rest.slice(m.token.length).startsWith(b.token)));
-    if(multi) {multiplier=multi.count; rest=rest.slice(multi.token.length);}
+    const multi=MULTIPLIERS.find(m=>rest.startsWith(m.token)&&BRANCH_NAMES.some(b=>rest.slice(m.token.length).replace(/^-/,'').startsWith(b.token)));
+    if(multi) {multiplier=multi.count; rest=rest.slice(multi.token.length).replace(/^-/,'');}
     const match=BRANCH_NAMES.find(b=>rest.startsWith(b.token));
     if(!match) return null;
     rest=rest.slice(match.token.length).replace(/^-/,'');
-    if(multiplier!==positions.length) throw new ChemistryError('I locanti non corrispondono al numero dei sostituenti (di-, tri-, tetra-).','INVALID_NOMENCLATURE');
+    if(multiplier!==positions.length) throw new ChemistryError(`Il gruppo ${multi?.token||match.token} richiede ${multiplier} locanti, ma ne hai indicati ${positions.length}.`,'MULTIPLIER_MISMATCH');
     positions.forEach(position=>{
-      if(position<1||position>parentLength) throw new ChemistryError(`Il locante ${position} è fuori dalla catena di ${parentLength} carboni.`,'INVALID_NOMENCLATURE');
+      if(position<1||position>parentLength) throw new ChemistryError(`Il locante ${position} è fuori dalla catena di ${parentLength} carboni.`,'INVALID_LOCANT');
       result.push({position,...match.branch});
     });
   }
@@ -148,7 +155,7 @@ function parseLocal(name) {
   const {length,cycle,order,position}=parent;
   if(cycle&&length<3) throw new ChemistryError('Una catena ciclica deve contenere almeno tre carboni.','INVALID_NOMENCLATURE');
   if(cycle&&order>1)return null; // Valid nomenclature outside the local subset goes to PubChem.
-  if(order>1&&(length<2||position<1||position>=length)) throw new ChemistryError('Il locante del legame multiplo è fuori dalla catena.','INVALID_NOMENCLATURE');
+  if(order>1&&(length<2||position<1||position>=length)) throw new ChemistryError('Il locante del legame multiplo è fuori dalla catena.','INVALID_LOCANT');
   const atoms=[],bonds=[],backbone=Array.from({length},(_,i)=>i);
   for(let i=0;i<length;i++) {
     const angle=2*Math.PI*i/length;
@@ -176,7 +183,7 @@ function parseLocal(name) {
   });
   const degree=atoms.map(()=>0); bonds.forEach(b=>{degree[b.from]+=b.order;degree[b.to]+=b.order;});
   atoms.forEach((a,i)=>{
-    if(degree[i]>4) throw new ChemistryError('Questo nome richiederebbe più di quattro legami su un carbonio. Controlla i locanti.','INVALID_NOMENCLATURE');
+    if(degree[i]>4) throw new ChemistryError(`Il carbonio ${i+1} avrebbe ${degree[i]} legami: un carbonio neutro ne può formare quattro. Controlla i sostituenti e i locanti.`,'INVALID_VALENCE');
     a.hydrogens=4-degree[i];
   });
   const family=cycle?'Cicloalcano':order===1?(branches.length?'Alcano ramificato':'Alcano'):order===2?'Alchene':'Alchino';
@@ -187,11 +194,14 @@ function parseLocal(name) {
   const reverse=!cycle&&(order>1?(length-position<position||length-position===position&&compareLocants(reverseLocants,forwardLocants)<0):compareLocants(reverseLocants,forwardLocants)<0);
   if(reverse)backbone.reverse();
   const grouped=new Map();branches.forEach(b=>{const key=b.canonical;grouped.set(key,[...(grouped.get(key)||[]),reverse?length+1-b.position:b.position]);});
-  const canonicalPrefix=[...grouped].sort((a,b)=>a[0].localeCompare(b[0])).map(([label,locants])=>`${locants.sort((a,b)=>a-b).join(',')}-${locants.length===1?'':({2:'di',3:'tri',4:'tetra',5:'penta',6:'hexa'}[locants.length]||'')}${label}`).join('-');
+  const groups=[...grouped].sort((a,b)=>alphabeticalBranch(a[0]).localeCompare(alphabeticalBranch(b[0])));
+  const canonicalPrefix=groups.map(([label,locants])=>`${locants.sort((a,b)=>a-b).join(',')}-${locants.length===1?'':(ENGLISH_MULTIPLIERS[locants.length]||'')}${label}`).join('-');
   const canonicalParent=(cycle?'cyclo':'')+ENGLISH_ROOTS[length]+(order===1?'ane':`-${reverse?length-position:position}-${order===2?'ene':'yne'}`);
-  const compound={name,canonicalName:(canonicalPrefix||'')+canonicalParent,formula:formulaFromGraph(atoms),mass:Number(graphMass(atoms).toFixed(3)),family,sourceLabel:'Nomenclatura locale',sourceUrl:'https://iupac.org/what-we-do/nomenclature/',atoms,bonds,backbone,conformerSource:'Geometria 3D stimata · non ottimizzata',notes:['La geometria 3D è una rappresentazione didattica stimata, non un conformero calcolato con un metodo energetico.']};
+  const italianPrefix=groups.map(([label,locants])=>`${locants.join(',')}-${locants.length===1?'':(ITALIAN_MULTIPLIERS[locants.length]||'')}${ITALIAN_BRANCHES[label]||label}`).join('-');
+  const normalizedName=italianPrefix+(cycle?'ciclo':'')+ITALIAN_ROOTS[length]+(order===1?'ano':`-${reverse?length-position:position}-${order===2?'ene':'ino'}`);
+  const compound={name,canonicalName:(canonicalPrefix||'')+canonicalParent,canonicalNameVerified:false,namingStatus:'interpreted',normalizedName,inputInterpretation:`Interpretato come ${normalizedName}.`,formula:formulaFromGraph(atoms),mass:Number(graphMass(atoms).toFixed(3)),family,sourceLabel:'Nomenclatura locale',sourceUrl:'https://iupac.org/what-we-do/nomenclature/',atoms,bonds,backbone,conformerSource:'Geometria 3D stimata · non ottimizzata',notes:['La geometria 3D è una rappresentazione didattica stimata, non un conformero calcolato con un metodo energetico.']};
   compound.condensed=cycle?(branches.length?`ciclo-(${chainFragment(compound,backbone)})`:`ciclo-(CH2)${length}`):chainFragment(compound,backbone);
-  if(!cycle&&longestPath(compound)?.length>length)compound.notes.push('Il nome inserito descrive una struttura, ma la catena principale non è la più lunga: controlla la nomenclatura IUPAC.');
+  if(!cycle&&longestPath(compound)?.length>length)compound.notes.push('Nome non preferito: la struttura è interpretabile, ma la catena principale indicata non è la più lunga.');
   if(cycle&&branches.length)compound.notes.push('Per gli anelli sostituiti il nome locale è una traduzione del nome inserito; la numerazione IUPAC dell’anello non viene ricostruita.');
   return compound;
 }
@@ -300,7 +310,7 @@ async function lookupPubChem(name,signal) {
   abortCheck(signal);
   if(two.status!=='fulfilled')throw two.reason;
   const graph=readPubChem(two.value.PC_Compounds?.[0]);
-  const compound={name,canonicalName:p.IUPACName||query,formula:p.MolecularFormula,mass:Number(p.MolecularWeight),family:inferFamily(graph.atoms,graph.bonds),sourceLabel:'PubChem',sourceUrl:`https://pubchem.ncbi.nlm.nih.gov/compound/${p.CID}`,smiles:p.ConnectivitySMILES||p.SMILES,atoms:graph.atoms,bonds:graph.bonds,conformerSource:'Geometria 3D stimata · conformero non disponibile',notes:[]};
+  const compound={name,canonicalName:p.IUPACName||query,canonicalNameVerified:Boolean(p.IUPACName),namingStatus:'verified',normalizedName:p.IUPACName||query,formula:p.MolecularFormula,mass:Number(p.MolecularWeight),family:inferFamily(graph.atoms,graph.bonds),sourceLabel:'PubChem',sourceUrl:`https://pubchem.ncbi.nlm.nih.gov/compound/${p.CID}`,smiles:p.ConnectivitySMILES||p.SMILES,atoms:graph.atoms,bonds:graph.bonds,conformerSource:'Geometria 3D stimata · conformero non disponibile',notes:[]};
   let merged=false;
   if(three.status==='fulfilled') {try{merged=merge3d(compound,readPubChem(three.value.PC_Compounds?.[0]));}catch{/* The verified 2D structure remains usable when 3D is unavailable. */}}
   if(!merged) {
@@ -322,6 +332,135 @@ export async function resolveCompound(input,{signal}={}) {
   const bundled=resolveBundled(name,key);
   const compound=bundled||parseLocal(name)||await lookupPubChem(name,signal);
   abortCheck(signal);cache.set(key,clone(compound));
+  return compound;
+}
+
+function graphValences(element,charge) {
+  if(!Number.isInteger(charge)||Math.abs(charge)>1)return null;
+  if(element==='H')return charge===0?[1]:[0];
+  if(element==='C'||element==='Si')return charge===0?[4]:[3];
+  if(element==='B')return charge===0?[3]:charge===-1?[4]:[2];
+  if(element==='N')return charge===0?[3]:charge===1?[4]:[2];
+  if(element==='O')return charge===0?[2]:charge===1?[3]:[1];
+  if(['F','Cl','Br','I'].includes(element))return charge===0?[1]:charge===-1?[0]:[2];
+  if(element==='P')return charge===0?[3,5]:charge===1?[4,6]:[2,4,6];
+  if(element==='S')return charge===0?[2,4,6]:charge===1?[3,5]:[1,3,5];
+  return null;
+}
+
+function rootedSignature(graph,node,parent=-1) {
+  return '('+graph[node].filter(n=>n.to!==parent).map(n=>rootedSignature(graph,n.to,node)).sort().join('')+')';
+}
+function referenceSignature(branch) {
+  const graph=Array.from({length:branch.count},()=>[]);
+  branch.edges.forEach(([a,b])=>{graph[a].push({to:b});graph[b].push({to:a});});
+  return rootedSignature(graph,0);
+}
+const BRANCH_SIGNATURES=BRANCHES.map(branch=>({signature:referenceSignature(branch),branch}));
+function lexicographicNumbers(a,b) {
+  for(let i=0;i<Math.max(a.length,b.length);i++){const difference=(a[i]??0)-(b[i]??0);if(difference)return difference;}
+  return 0;
+}
+function interpretedTreeName(compound) {
+  if(!compound.atoms.every(a=>a.element==='C'&&a.charge===0)||compound.bonds.some(b=>b.order!==1)||compound.bonds.length!==compound.atoms.length-1)return null;
+  const graph=adjacency(compound),leaves=graph.flatMap((neighbors,i)=>neighbors.length<=1?[i]:[]),candidates=[];
+  let maximumLength=0;
+  for(const start of leaves) {
+    const stack=[{node:start,parent:-1,path:[start]}];
+    while(stack.length) {
+      const {node,parent,path}=stack.pop();
+      if(graph[node].length<=1) {
+        if(path.length>maximumLength){maximumLength=path.length;candidates.length=0;}
+        if(path.length===maximumLength)candidates.push(path);
+      }
+      graph[node].forEach(n=>{if(n.to!==parent)stack.push({node:n.to,parent:node,path:[...path,n.to]});});
+    }
+  }
+  if(!ENGLISH_ROOTS[maximumLength])return null;
+  const interpreted=[];
+  for(const path of candidates) {
+    const mainSet=new Set(path),groups=new Map();let valid=true;
+    path.forEach((node,index)=>graph[node].filter(n=>!mainSet.has(n.to)).forEach(n=>{
+      const signature=rootedSignature(graph,n.to,node);
+      const recognized=BRANCH_SIGNATURES.find(item=>item.signature===signature)?.branch;
+      if(!recognized){valid=false;return;}
+      const list=groups.get(recognized.canonical)||[];list.push(index+1);groups.set(recognized.canonical,list);
+    }));
+    if(!valid||[...groups.values()].some(locants=>locants.length>1&&!ENGLISH_MULTIPLIERS[locants.length]))continue;
+    const sorted=[...groups].sort((a,b)=>alphabeticalBranch(a[0]).localeCompare(alphabeticalBranch(b[0])));
+    const allLocants=sorted.flatMap(([,locants])=>locants).sort((a,b)=>a-b);
+    const enPrefix=sorted.map(([label,locants])=>locants.join(',')+'-'+(locants.length===1?'':ENGLISH_MULTIPLIERS[locants.length])+label).join('-');
+    const itPrefix=sorted.map(([label,locants])=>locants.join(',')+'-'+(locants.length===1?'':ITALIAN_MULTIPLIERS[locants.length])+(ITALIAN_BRANCHES[label]||label)).join('-');
+    interpreted.push({backbone:path,canonicalName:enPrefix+ENGLISH_ROOTS[path.length]+'ane',normalizedName:itPrefix+ITALIAN_ROOTS[path.length]+'ano',branchCount:allLocants.length,locants:allLocants,alphabeticalLocants:sorted.flatMap(([,locants])=>locants)});
+  }
+  interpreted.sort((a,b)=>b.branchCount-a.branchCount||lexicographicNumbers(a.locants,b.locants)||lexicographicNumbers(a.alphabeticalLocants,b.alphabeticalLocants));
+  return interpreted[0]||null;
+}
+
+/**
+ * Derive a compound from an explicitly drawn graph, without mutating it.
+ * H counts are exact when supplied; otherwise the lowest supported valence is used.
+ * Only simple connected graphs and the supported closed-shell element valences
+ * are accepted. Metadata and atom groups are retained; imported SDF provenance
+ * is discarded because drawn coordinates are always estimated.
+ */
+export function compoundFromGraph(input,options={}) {
+  if(!input||!Array.isArray(input.atoms)||!Array.isArray(input.bonds)||!input.atoms.length)throw new ChemistryError('Disegna almeno un atomo e fornisci una lista di legami.','GRAPH_EMPTY');
+  if(input.atoms.length>100)throw new ChemistryError('Il disegno può contenere al massimo 100 atomi.','STRUCTURE_TOO_LARGE');
+  const graphInput=clone(input),atoms=graphInput.atoms,bonds=graphInput.bonds;
+  const bondValence=atoms.map(()=>0),bondKeys=new Set();
+  atoms.forEach((atom,index)=>{
+    if(!atom||typeof atom.element!=='string'||!Object.hasOwn(ATOMIC_WEIGHTS,atom.element))throw new ChemistryError(`L’elemento dell’atomo ${index+1} non è supportato nel disegno.`,'GRAPH_ELEMENT');
+    atom.charge=atom.charge??0;
+    if(!graphValences(atom.element,atom.charge))throw new ChemistryError(`La carica dell’atomo ${index+1} non è supportata.`,'GRAPH_CHARGE');
+    ['x','y','z','x2d','y2d'].forEach(key=>{if(atom[key]!==undefined&&!Number.isFinite(atom[key]))throw new ChemistryError(`La coordinata ${key} dell’atomo ${index+1} non è valida.`,'GRAPH_COORDINATES');});
+  });
+  bonds.forEach((bond,index)=>{
+    if(!bond||!Number.isInteger(bond.from)||!Number.isInteger(bond.to)||bond.from<0||bond.to<0||bond.from>=atoms.length||bond.to>=atoms.length||bond.from===bond.to||![1,2,3].includes(bond.order))throw new ChemistryError(`Il legame ${index+1} deve collegare due atomi diversi con ordine 1, 2 o 3.`,'GRAPH_BOND');
+    const key=[bond.from,bond.to].sort((a,b)=>a-b).join(':');
+    if(bondKeys.has(key))throw new ChemistryError('Due atomi non possono avere due legami separati: modifica l’ordine del legame esistente.','GRAPH_BOND');
+    bondKeys.add(key);bondValence[bond.from]+=bond.order;bondValence[bond.to]+=bond.order;
+  });
+  const graph=adjacency({atoms,bonds}),visited=new Set([0]),stack=[0];
+  while(stack.length){const node=stack.pop();graph[node].forEach(n=>{if(!visited.has(n.to)){visited.add(n.to);stack.push(n.to);}});}
+  if(visited.size!==atoms.length)throw new ChemistryError('Collega tutti gli atomi: il disegno deve rappresentare una sola molecola.','GRAPH_DISCONNECTED');
+  atoms.forEach((atom,index)=>{
+    const allowed=graphValences(atom.element,atom.charge),attached=bondValence[index];
+    if(attached>allowed.at(-1))throw new ChemistryError(`L’atomo ${index+1} (${atom.element}) avrebbe troppi legami: ${attached}.`,'GRAPH_VALENCE');
+    if(atom.hydrogens===undefined) {
+      const target=allowed.find(value=>value>=attached);
+      atom.hydrogens=atom.element==='H'?0:target-attached;
+      if(!allowed.includes(attached+atom.hydrogens))throw new ChemistryError(`L’atomo ${index+1} (${atom.element}) richiede un legame per questa carica.`,'GRAPH_VALENCE');
+    } else {
+      if(!Number.isInteger(atom.hydrogens)||atom.hydrogens<0||atom.element==='H'&&atom.hydrogens!==0)throw new ChemistryError(`Gli idrogeni dell’atomo ${index+1} devono essere un intero non negativo.`,'GRAPH_HYDROGENS');
+      if(!allowed.includes(attached+atom.hydrogens))throw new ChemistryError(`L’atomo ${index+1} (${atom.element}) ha ${atom.hydrogens} idrogeni e ${attached} legami: questa valenza non è supportata.`,'GRAPH_HYDROGENS');
+    }
+  });
+  let inputBackbone;
+  if(graphInput.backbone!==undefined) {
+    inputBackbone=graphInput.backbone;
+    if(!Array.isArray(inputBackbone)||!inputBackbone.length||new Set(inputBackbone).size!==inputBackbone.length||inputBackbone.some((index,i)=>!Number.isInteger(index)||index<0||index>=atoms.length||i>0&&!graph[inputBackbone[i-1]].some(n=>n.to===index)))throw new ChemistryError('La catena indicata deve essere un percorso continuo di atomi diversi.','GRAPH_BACKBONE');
+  }
+  const derived=interpretedTreeName({atoms,bonds}),layoutBackbone=inputBackbone||derived?.backbone||longestPath({atoms,bonds});
+  const fallbackPositions=atoms.map((atom,index)=>{
+    const position=layoutBackbone?.indexOf(index)??-1;
+    return position>=0?{x:(position-(layoutBackbone.length-1)/2)*1.3,y:position%2?.39:-.39}:{x:Math.cos(index*2*Math.PI/atoms.length)*Math.max(1.5,atoms.length*.22),y:Math.sin(index*2*Math.PI/atoms.length)*Math.max(1.5,atoms.length*.22)};
+  });
+  atoms.forEach((atom,index)=>{
+    atom.x2d=atom.x2d??atom.x??fallbackPositions[index].x;atom.y2d=atom.y2d??atom.y??fallbackPositions[index].y;
+    atom.x=atom.x??atom.x2d;atom.y=atom.y??atom.y2d;atom.z=atom.z??0;
+  });
+  const totalCharge=atoms.reduce((sum,atom)=>sum+atom.charge,0);
+  const formula=formulaFromGraph(atoms)+(totalCharge?(totalCharge>0?'+':'-')+(Math.abs(totalCharge)===1?'':Math.abs(totalCharge)):'');
+  const compound={...graphInput,atoms,bonds,name:options.name?cleanName(options.name):derived?.normalizedName||'Molecola disegnata',canonicalName:derived?.canonicalName||'',canonicalNameVerified:false,namingStatus:derived?'reconstructed':'drawn',normalizedName:derived?.normalizedName||'',inputInterpretation:derived?`Struttura ricostruita come ${derived.normalizedName}.`:'Struttura ricostruita dal disegno; nome non determinato.',formula,totalCharge,mass:Number(graphMass(atoms).toFixed(3)),family:inferFamily(atoms,bonds),sourceLabel:options.sourceLabel||'Disegno 2D',conformerSource:'Geometria 3D stimata · disegno non ottimizzato',notes:['La struttura deriva dal disegno; la geometria 3D è stimata e non ottimizzata.'],condensed:null};
+  delete compound.sdf3d;delete compound.sourceUrl;delete compound.smiles;delete compound.backbone;
+  if(inputBackbone)compound.inputBackbone=[...inputBackbone];
+  if(derived)compound.backbone=[...derived.backbone];
+  else if(inputBackbone?.every(index=>atoms[index].element==='C'))compound.backbone=[...inputBackbone];
+  if(Array.isArray(options.notes))compound.notes.push(...options.notes.filter(note=>typeof note==='string'));
+  const condensedBackbone=derived?.backbone||layoutBackbone;
+  if(condensedBackbone&&bonds.length===atoms.length-1)compound.condensed=chainFragment(compound,condensedBackbone);
+  if(!compound.condensed)compound.notes.push('Per questa struttura ciclica o complessa la condensata non viene ricostruita automaticamente.');
   return compound;
 }
 
@@ -384,7 +523,7 @@ function resolveBundled(name,key) {
   if(!definition)return null;
   const record=BUNDLED_REFERENCE_DATA.find(item=>item.properties.CID===definition.cid);
   const p=record.properties, graph=readPubChem(record.two);
-  const compound={name,canonicalName:p.IUPACName,formula:p.MolecularFormula,mass:Number(p.MolecularWeight),family:definition.family,sourceLabel:'PubChem · integrato',sourceUrl:`https://pubchem.ncbi.nlm.nih.gov/compound/${p.CID}`,smiles:p.ConnectivitySMILES,atoms:graph.atoms,bonds:graph.bonds,condensed:definition.condensed,conformerSource:'Conformero 3D PubChem',notes:[]};
+  const compound={name,canonicalName:p.IUPACName,canonicalNameVerified:true,namingStatus:'verified',normalizedName:p.IUPACName,formula:p.MolecularFormula,mass:Number(p.MolecularWeight),family:definition.family,sourceLabel:'PubChem · integrato',sourceUrl:`https://pubchem.ncbi.nlm.nih.gov/compound/${p.CID}`,smiles:p.ConnectivitySMILES,atoms:graph.atoms,bonds:graph.bonds,condensed:definition.condensed,conformerSource:'Conformero 3D PubChem',notes:[]};
   merge3d(compound,readPubChem(record.three));
   const backbone=longestPath(compound);
   if(backbone&&compound.atoms.every(a=>a.element==='C')) {

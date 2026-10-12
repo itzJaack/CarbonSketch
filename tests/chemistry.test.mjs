@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveCompound, buildLewisGraph, ChemistryError } from '../dist/chemistry.js';
+import { resolveCompound, compoundFromGraph, buildLewisGraph, ChemistryError } from '../dist/chemistry.js';
 
 function neighbors(compound,index) {
   return compound.bonds.flatMap(b=>b.from===index?[b.to]:b.to===index?[b.from]:[]);
@@ -94,8 +94,8 @@ test('invalid names and impossible locants fail instead of fabricating molecules
   for(const name of ['',null,'<script>benzene</script>','x'.repeat(161)]) {
     await assert.rejects(resolveCompound(name),error=>error instanceof ChemistryError&&error.code==='INVALID_NAME');
   }
-  for(const name of ['8-metilpentano','2,2,2-trimetilpropano','2-dimetilesano','2,3-metilesano','but-5-ene']) {
-    await assert.rejects(resolveCompound(name),error=>error instanceof ChemistryError&&error.code==='INVALID_NOMENCLATURE');
+  for(const [name,code] of [['8-metilpentano','INVALID_LOCANT'],['2,2,2-trimetilpropano','INVALID_VALENCE'],['2-dimetilesano','MULTIPLIER_MISMATCH'],['2,3-metilesano','MULTIPLIER_MISMATCH'],['but-5-ene','INVALID_LOCANT']]) {
+    await assert.rejects(resolveCompound(name),error=>error instanceof ChemistryError&&error.code===code);
   }
 });
 
@@ -211,4 +211,111 @@ test('cyclic unsaturated nomenclature outside the local subset reaches verified 
     await assert.rejects(resolveCompound('cyclohexene'),error=>error.code==='NOT_FOUND');
     assert.equal(called,true);
   } finally {globalThis.fetch=originalFetch;}
+});
+
+test('tolerant punctuation keeps every explicitly named substituent',async()=>{
+  const first=await resolveCompound('2-3-4-trimetilesano');
+  assert.equal(first.formula,'C9H20');
+  assert.equal(first.normalizedName,'2,3,4-trimetilesano');
+  assert.equal(first.canonicalNameVerified,false);
+  assert.match(first.inputInterpretation,/2,3,4-trimetilesano/);
+  verifyValence(first);
+  const second=await resolveCompound('4,5dietil2,3,4,5tetraetilnonano');
+  assert.equal(second.formula,'C21H44');
+  assert.equal(second.atoms.length,21);
+  assert.equal(second.bonds.length,20);
+  assert.equal(second.normalizedName,'2,3,4,4,5,5-esaetilnonano');
+  const main=new Set(second.backbone);
+  const attachmentLocants=second.backbone.flatMap((node,i)=>neighbors(second,node).filter(index=>!main.has(index)).map(()=>i+1));
+  assert.deepEqual(attachmentLocants,[2,3,4,4,5,5]);
+  assert.equal(second.atoms[3].hydrogens,0);
+  assert.equal(second.atoms[4].hydrogens,0);
+  assert.ok(second.notes.some(note=>/Nome non preferito/.test(note)));
+  assert.equal(second.canonicalNameVerified,false);
+  verifyValence(second);
+});
+
+test('tolerant parsing still rejects multiplier mismatches and overfilled carbons',async()=>{
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=async()=>{throw new Error('invalid recognized names must not reach network');};
+  try {
+    await assert.rejects(resolveCompound('2-3trimetilesano'),error=>error.code==='MULTIPLIER_MISMATCH');
+    await assert.rejects(resolveCompound('2,3,4dimetilesano'),error=>error.code==='MULTIPLIER_MISMATCH');
+    // Without comma/dash separators, 234 remains one locant; it is never split
+    // into the three locants required by tri-. Rejection happens locally.
+    for(const name of ['234-trimetilesano','2 3 4 trimetilesano']) {
+      await assert.rejects(resolveCompound(name),error=>error instanceof ChemistryError&&error.code==='MULTIPLIER_MISMATCH');
+    }
+    await assert.rejects(resolveCompound('4,4,4trietilnonano'),error=>error.code==='INVALID_VALENCE');
+    await assert.rejects(resolveCompound('10etilnonano'),error=>error.code==='INVALID_LOCANT');
+  } finally {globalThis.fetch=originalFetch;}
+});
+
+test('drawn graph derives formula, mass, explicit Lewis H and preserves supplied metadata without mutation',()=>{
+  const input={title:'editor draft',atoms:[{element:'C',hydrogens:3,x2d:0,y2d:0,group:{text:'CH3',color:'blue'}},{element:'C',hydrogens:2,x2d:1.3,y2d:.39},{element:'O',hydrogens:1,x2d:2.6,y2d:0}],bonds:[{from:0,to:1,order:1,annotation:'first'},{from:1,to:2,order:1}],backbone:[0,1,2],sdf3d:'old PubChem conformer',sourceUrl:'https://example.com/old-record'};
+  const snapshot=structuredClone(input);
+  const drawn=compoundFromGraph(input);
+  assert.deepEqual(input,snapshot);
+  assert.equal(drawn.name,'Molecola disegnata');
+  assert.equal(drawn.canonicalName,'');
+  assert.equal(drawn.formula,'C2H6O');
+  assert.equal(drawn.mass,46.069);
+  assert.equal(drawn.condensed,'CH3-CH2-OH');
+  assert.deepEqual(drawn.atoms[0].group,{text:'CH3',color:'blue'});
+  assert.equal(drawn.atoms[1].x2d,1.3);
+  assert.equal(drawn.bonds[0].annotation,'first');
+  assert.equal(drawn.title,'editor draft');
+  assert.equal(drawn.sdf3d,undefined);
+  assert.equal(drawn.sourceUrl,undefined);
+  assert.equal(drawn.backbone,undefined,'heteroatom sequence is a layout path, not a carbon parent');
+  assert.deepEqual(drawn.inputBackbone,[0,1,2]);
+  assert.equal(buildLewisGraph(drawn).atoms.filter(a=>a.element==='H').length,6);
+  assert.match(drawn.conformerSource,/stimata/);
+  drawn.atoms[0].group.text='changed';
+  assert.equal(input.atoms[0].group.text,'CH3');
+});
+
+test('drawn alkane names use the longest parent and safe known substituents only',()=>{
+  const graph={atoms:Array.from({length:5},()=>({element:'C'})),bonds:[{from:0,to:1,order:1},{from:1,to:2,order:1},{from:1,to:3,order:1},{from:1,to:4,order:1}],backbone:[0,1]};
+  const drawn=compoundFromGraph(graph);
+  assert.equal(drawn.formula,'C5H12');
+  assert.equal(drawn.canonicalName,'2,2-dimethylpropane');
+  assert.equal(drawn.name,'2,2-dimetilpropano');
+  assert.equal(drawn.backbone.length,3);
+  assert.deepEqual(drawn.inputBackbone,[0,1]);
+  assert.equal(drawn.atoms[1].hydrogens,0);
+  assert.equal(drawn.canonicalNameVerified,false);
+  const methane=compoundFromGraph({atoms:[{element:'C'}],bonds:[]});
+  assert.equal(methane.formula,'CH4');
+  assert.equal(methane.name,'metano');
+});
+
+test('drawn graph rejects wrong H, impossible valence, disconnected/self/duplicate bonds and invalid coordinates',()=>{
+  const rejects=(graph,code)=>assert.throws(()=>compoundFromGraph(graph),error=>error instanceof ChemistryError&&error.code===code);
+  rejects({atoms:[{element:'C',hydrogens:3}],bonds:[]},'GRAPH_HYDROGENS');
+  rejects({atoms:[{element:'C',hydrogens:-1}],bonds:[]},'GRAPH_HYDROGENS');
+  rejects({atoms:[{element:'Au'}],bonds:[]},'GRAPH_ELEMENT');
+  rejects({atoms:[{element:'C',charge:2}],bonds:[]},'GRAPH_CHARGE');
+  rejects({atoms:[{element:'C',x2d:NaN}],bonds:[]},'GRAPH_COORDINATES');
+  rejects({atoms:[{element:'C'}],bonds:[{from:0,to:0,order:1}]},'GRAPH_BOND');
+  rejects({atoms:[{element:'C'},{element:'C'}],bonds:[{from:0,to:1,order:1},{from:1,to:0,order:1}]},'GRAPH_BOND');
+  rejects({atoms:[{element:'C'},{element:'C'}],bonds:[]},'GRAPH_DISCONNECTED');
+  rejects({atoms:[{element:'C'},{element:'C'}],bonds:[{from:0,to:2,order:1}]},'GRAPH_BOND');
+  rejects({atoms:[{element:'C'},{element:'C'}],bonds:[{from:0,to:1,order:1.5}]},'GRAPH_BOND');
+  rejects({atoms:Array.from({length:6},()=>({element:'C'})),bonds:Array.from({length:5},(_,i)=>({from:0,to:i+1,order:1}))},'GRAPH_VALENCE');
+  rejects({atoms:[{element:'H'}],bonds:[]},'GRAPH_VALENCE');
+});
+
+test('drawn neutral nitrile, carbonyl and charged ammonium use supported valences',()=>{
+  const nitrile=compoundFromGraph({atoms:[{element:'C',hydrogens:3},{element:'C',hydrogens:0},{element:'N',hydrogens:0}],bonds:[{from:0,to:1,order:1},{from:1,to:2,order:3}],backbone:[0,1,2]});
+  assert.equal(nitrile.formula,'C2H3N');
+  assert.equal(nitrile.condensed,'CH3-C≡N');
+  assert.equal(buildLewisGraph(nitrile).atoms[2].lonePairs,1);
+  const ketone=compoundFromGraph({atoms:[{element:'C',hydrogens:3},{element:'C',hydrogens:0},{element:'C',hydrogens:3},{element:'O',hydrogens:0}],bonds:[{from:0,to:1,order:1},{from:1,to:2,order:1},{from:1,to:3,order:2}],backbone:[0,1,2]});
+  assert.equal(ketone.formula,'C3H6O');
+  assert.equal(ketone.condensed,'CH3-C(=O)-CH3');
+  const ammonium=compoundFromGraph({atoms:[{element:'N',charge:1,hydrogens:4}],bonds:[]});
+  assert.equal(ammonium.formula,'H4N+');
+  assert.equal(ammonium.condensed,'[NH4+]');
+  assert.equal(buildLewisGraph(ammonium).atoms[0].lonePairs,0);
 });
